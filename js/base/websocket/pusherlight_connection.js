@@ -72,29 +72,29 @@ module.exports = class PusherLightConnection extends WebsocketBaseConnection {
             }
             const that = this;
             client.ws.onopen = async function (){
-            //client.ws.on('open', async () => {
+                //client.ws.on('open', async () => {
                 that.emit ('open');
-            //});
+                //});
             };
             client.ws.onerror = function (error) {
-            //client.ws.on('error', (error) => {
+                //client.ws.on('error', (error) => {
                 if (!client.isClosing) {
                     that.emit('err', error);
                 }
                 reject(error);
-            //});
+                //});
             };
             client.ws.onclose = function (){
-            //client.ws.on('close', () => {
+                //client.ws.on('close', () => {
                 if (!client.isClosing) {
                     that.emit('close');
                 }
                 reject('closing');
-            //});
+                //});
             };
             client.ws.onmessage = async function(dat){
                 const data = dat;
-            //client.ws.on('message', async (data) => {
+                //client.ws.on('message', async (data) => {
                 if (that.options['verbose']){
                     console.log("PusherLightConnection: " + data);
                 }
@@ -102,7 +102,19 @@ module.exports = class PusherLightConnection extends WebsocketBaseConnection {
                     return;
                 }
                 that.resetActivityCheck ();
-                const msg = JSON.parse(data);
+                let msg = {};
+                try{
+                    msg = JSON.parse(data);
+                }
+                catch(e1){
+                    if(data && data.data){
+                        msg = data;
+                    }
+                    else{
+                        return;
+                    }
+                }
+
                 if (msg.event === 'pusher:connection_established'){
                     // starting
                     const eventData = JSON.parse(msg.data);
@@ -137,7 +149,7 @@ module.exports = class PusherLightConnection extends WebsocketBaseConnection {
                         data: eventData
                     }));
                 }
-            //});
+                //});
             }
             this.client = client;
         });
@@ -176,7 +188,7 @@ module.exports = class PusherLightConnection extends WebsocketBaseConnection {
         if (this.client.ws == null){
             return false;
         }
-        return (this.client.ws.readyState == this.client.ws.OPEN) || 
+        return (this.client.ws.readyState == this.client.ws.OPEN) ||
             (this.client.ws.readyState == this.client.ws.CONNECTING);
     }
 };

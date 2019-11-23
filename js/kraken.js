@@ -566,6 +566,9 @@ module.exports = class kraken extends Exchange {
 
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
+        if(symbol === "XBT/USD"){
+            symbol = "BTC/USD";
+        }
         const market = this.market (symbol);
         const request = {
             'pair': market['id'],

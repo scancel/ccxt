@@ -170,8 +170,8 @@ module.exports = class bitstamp extends Exchange {
             'wsconf': {
                 'conx-tpls': {
                     'default': {
-                        'type': 'pusher',
-                        'baseurl': 'wss://ws-mt1.pusher.com:443/app/de504dc5763aeef9ff52',
+                        'type': 'ws',
+                        'baseurl': 'wss://ws.bitstamp.net',
                     },
                 },
                 'methodmap': {
@@ -1291,13 +1291,11 @@ module.exports = class bitstamp extends Exchange {
         } else if (event === 'trade') {
             channel = 'live_trades';
         }
-        if (symbol !== 'BTC/USD') {
-            const id = this.marketId (symbol);
-            channel = channel + '_' + id;
-        }
+        const id = this.marketId (symbol);
+        channel = channel + '_' + id;
         this.websocketSendJson ({
-            'event': 'subscribe',
-            'channel': channel,
+            'event': 'bts:subscribe',
+            'data': {channel},
         }, contextId);
     }
 
@@ -1317,7 +1315,7 @@ module.exports = class bitstamp extends Exchange {
         }
         this.websocketSendJson ({
             'event': 'unsubscribe',
-            'channel': channel,
+            'data': {channel},
         });
         const nonceStr = nonce.toString ();
         this.emit (nonceStr, true);

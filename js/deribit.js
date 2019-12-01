@@ -73,6 +73,69 @@ module.exports = class deribit extends Exchange {
                     ],
                 },
             },
+            'wsconf': {
+                'conx-tpls': {
+                    'default': {
+                        'type': 'ws-s',
+                        'baseurl': 'wss://www.deribit.com/ws/api/v1',
+                    },
+                },
+                'methodmap': {
+                    'fetchOrderBook': 'fetchOrderBook',
+                    '_websocketHandleObRestSnapshot': '_websocketHandleObRestSnapshot',
+                },
+                'events': {
+                    'ob': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                            'stream': '{symbol}@depth@{obinterval}',
+                            'stream2': '{symbol}@depth{obdepth}@{obinterval}',
+                        },
+                    },
+                    'partob': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                            'stream': '{symbol}@depth{obdepth}@{obinterval}',
+                        },
+                    },
+                    'aggtrade': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                            'stream': '{symbol}@aggTrade',
+                        },
+                    },
+                    'trade': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                            'stream': '{symbol}@trade',
+                        },
+                    },
+                    'ohlcv': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                            'stream': '{symbol}@kline_{interval}',
+                        },
+                    },
+                    'ticker': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                            'stream': '{symbol}@ticker',
+                        },
+                    },
+                },
+            },
             'exceptions': {
                 // 0 or absent Success, No error
                 '9999': PermissionDenied,   // "api_not_enabled" User didn't enable API for the Account
@@ -186,22 +249,68 @@ module.exports = class deribit extends Exchange {
     }
 
     async fetchBalance (params = {}) {
+        await this.loadMarkets ();
         const response = await this.privateGetAccount (params);
+        //
+        //     {
+        //         "usOut":1569048827943520,
+        //         "usIn":1569048827943020,
+        //         "usDiff":500,
+        //         "testnet":false,
+        //         "success":true,
+        //         "result":{
+        //             "equity":2e-9,
+        //             "maintenanceMargin":0.0,
+        //             "initialMargin":0.0,
+        //             "availableFunds":0.0,
+        //             "balance":0.0,
+        //             "marginBalance":0.0,
+        //             "SUPL":0.0,
+        //             "SRPL":0.0,
+        //             "PNL":0.0,
+        //             "optionsPNL":0.0,
+        //             "optionsSUPL":0.0,
+        //             "optionsSRPL":0.0,
+        //             "optionsD":0.0,
+        //             "optionsG":0.0,
+        //             "optionsV":0.0,
+        //             "optionsTh":0.0,
+        //             "futuresPNL":0.0,
+        //             "futuresSUPL":0.0,
+        //             "futuresSRPL":0.0,
+        //             "deltaTotal":0.0,
+        //             "sessionFunding":0.0,
+        //             "depositAddress":"13tUtNsJSZa1F5GeCmwBywVrymHpZispzw",
+        //             "currency":"BTC"
+        //         },
+        //         "message":""
+        //     }
+        //
         const result = {
-            'BTC': {
-                'free': this.safeFloat (response['result'], 'availableFunds'),
-                'used': this.safeFloat (response['result'], 'maintenanceMargin'),
-                'total': this.safeFloat (response['result'], 'equity'),
-            },
+            'info': response,
         };
+        const balance = this.safeValue (response, 'result', {});
+        const currencyId = this.safeString (balance, 'currency');
+        const code = this.safeCurrencyCode (currencyId);
+        const account = this.account ();
+        account['free'] = this.safeFloat (balance, 'availableFunds');
+        account['used'] = this.safeFloat (balance, 'maintenanceMargin');
+        account['total'] = this.safeFloat (balance, 'equity');
+        result[code] = account;
         return this.parseBalance (result);
     }
 
-    async fetchDepositAddress (currency, params = {}) {
-        const response = await this.privateGetAccount (params);
-        const address = this.safeString (response, 'depositAddress');
+    async fetchDepositAddress (code, params = {}) {
+        await this.loadMarkets ();
+        const currency = this.currency (code);
+        const request = {
+            'currency': currency['id'],
+        };
+        const response = await this.privateGetAccount (this.extend (request, params));
+        const result = this.safeValue (response, 'result', {});
+        const address = this.safeString (result, 'depositAddress');
         return {
-            'currency': this.safeCurrencyCode ('BTC'),
+            'currency': code,
             'address': address,
             'tag': undefined,
             'info': response,
@@ -656,5 +765,268 @@ module.exports = class deribit extends Exchange {
             }
             throw new ExchangeError (feedback); // unknown message
         }
+    }
+
+    websocketOnMessage (contextId, data) {
+        const msg = JSON.parse (data);
+        const stream = this.safeString (msg, 'stream');
+        const resData = this.safeValue (msg, 'data', {});
+        const parts = stream.split ('@');
+        const partsLen = parts.length;
+        if (partsLen >= 2) {
+            const msgType = parts[1];
+            if (msgType === 'depth') {
+                this._websocketHandleOb (contextId, resData);
+            } else if (msgType.indexOf ('depth') >= 0) {
+                const symbol = this.findSymbol (parts[0]);
+                this._websocketHandlePartialOb (contextId, symbol, resData);
+            } else if (msgType === 'trade') {
+                this._websocketHandleTrade (contextId, resData);
+            } else if (msgType === 'aggTrade') {
+                this._websocketHandleTrade (contextId, resData);
+            } else if (msgType.indexOf ('kline') >= 0) {
+                this._websocketHandleKline (contextId, resData);
+            } else if (msgType === 'ticker') {
+                this._websocketHandleTicker (contextId, resData);
+            }
+        }
+    }
+
+    _websocketHandleOb (contextId, data) {
+        const symbol = this.findSymbol (this.safeString (data, 's'));
+        // if asyncContext has no previous orderbook you have to cache all deltas
+        // and fetch orderbook from rest api
+        let symbolData = this._contextGetSymbolData (contextId, 'ob', symbol);
+        if (!('ob' in symbolData)) {
+            if (!('deltas' in symbolData)) {
+                symbolData['deltas'] = [];
+            }
+            const deltas = symbolData['deltas'];
+            const partsLen = deltas.length;
+            if (partsLen > 50) {
+                if (!('failCount' in symbolData)) {
+                    symbolData['failCount'] = 0;
+                }
+                symbolData['failCount'] = symbolData['failCount'] + 1;
+                if (symbolData['failCount'] > 5) {
+                    this.emit ('err', new ExchangeError (this.id + ': max deltas failCount reached for symbol ' + symbol));
+                    this.websocketClose (contextId);
+                } else {
+                    // Launch again
+                    symbolData = this.omit (symbolData, 'ob');
+                    symbolData = this.omit (symbolData, 'deltas');
+                }
+                this._contextSetSymbolData (contextId, 'ob', symbol, symbolData);
+            } else {
+                symbolData['deltas'].push (data);
+                if (!('snaplaunched' in symbolData)) {
+                    symbolData['snaplaunched'] = true;
+                    this._executeAndCallback (contextId, this._websocketMethodMap ('fetchOrderBook'), [symbol], this._websocketMethodMap ('_websocketHandleObRestSnapshot'), {
+                        'symbol': symbol,
+                        'contextId': contextId,
+                    });
+                }
+                this._contextSetSymbolData (contextId, 'ob', symbol, symbolData);
+            }
+        } else {
+            const config = this._contextGet (contextId, 'config');
+            symbolData['ob'] = this.mergeOrderBookDelta (symbolData['ob'], data, data['E'], 'b', 'a');
+            if (typeof config !== 'undefined') {
+                this.emit ('ob', symbol, this._cloneOrderBook (symbolData['ob'], config['ob'][symbol]['limit']));
+            } else {
+                this.emit ('ob', symbol, this._cloneOrderBook (symbolData['ob']));
+            }
+            this._contextSetSymbolData (contextId, 'ob', symbol, symbolData);
+        }
+    }
+
+    _websocketHandlePartialOb (contextId, symbol, data) {
+        const orderbook = this.parseOrderBook (data);
+        orderbook['nonce'] = this.safeInteger (data, 'lastUpdateId');
+        this.emit ('partob', symbol, orderbook);
+    }
+
+    _websocketHandleTrade (contextId, data) {
+        const symbol = this.findSymbol (this.safeString (data, 's'));
+        const market = this.market (symbol);
+        const trade = this.parseTrade (data, market);
+        this.emit ('trade', symbol, trade);
+    }
+
+    _websocketHandleKline (contextId, data) {
+        const symbol = this.findSymbol (this.safeString (data, 's'));
+        const market = this.market (symbol);
+        const kline = this.parseOHLCV ([
+            this.safeFloat (data['k'], 't'),
+            this.safeFloat (data['k'], 'o'),
+            this.safeFloat (data['k'], 'c'),
+            this.safeFloat (data['k'], 'h'),
+            this.safeFloat (data['k'], 'l'),
+            this.safeFloat (data['k'], 'v'),
+        ], market, this.safeFloat (data, 'i'));
+        this.emit ('ohlcv', symbol, kline);
+    }
+
+    _websocketHandleTicker (contextId, data) {
+        const symbol = this.findSymbol (this.safeString (data, 's'));
+        const market = this.market (symbol);
+        const ticker = this.parseTicker ({
+            'symbol': this.safeString (data, 's'),
+            'priceChange': this.safeString (data, 'p'),
+            'priceChangePercent': this.safeString (data, 'P'),
+            'weightedAvgPrice': this.safeString (data, 'v'),
+            'prevClosePrice': this.safeString (data, 'x'),
+            'lastPrice': this.safeString (data, 'c'),
+            'lastQty': this.safeString (data, 'Q'),
+            'bidPrice': this.safeString (data, 'b'),
+            'askPrice': this.safeString (data, 'a'),
+            'openPrice': this.safeString (data, 'o'),
+            'highPrice': this.safeString (data, 'h'),
+            'lowPrice': this.safeString (data, 'l'),
+            'volume': this.safeString (data, 'v'),
+            'quoteVolume': this.safeString (data, 'q'),
+            'openTime': this.safeString (data, 'O'),
+            'closeTime': this.safeString (data, 'C'),
+            'firstId': this.safeString (data, 'F'),   // First tradeId
+            'lastId': this.safeString (data, 'L'),    // Last tradeId
+            'count': this.safeString (data, 'n'),         // Trade count
+        }, market);
+        ticker['info'] = data;
+        this.emit ('ticker', symbol, ticker);
+    }
+
+    _websocketHandleObRestSnapshot (context, error, response) {
+        const symbol = context['symbol'];
+        const contextId = context['contextId'];
+        const data = this._contextGetSymbolData (contextId, 'ob', symbol);
+        const config = this._contextGet (contextId, 'config');
+        // console.log ('order book snapshot returned for '+ symbol);
+        if (!error) {
+            const lastUpdateId = this.safeInteger (response, 'nonce');
+            const deltas = data['deltas'];
+            let index = 0;
+            for (index = 0; index < deltas.length; index++) {
+                const delta = deltas[index];
+                const U = this.safeInteger (delta, 'U');
+                const u = this.safeInteger (delta, 'u');
+                if (u <= lastUpdateId) {
+                    continue;
+                }
+                if ((U <= lastUpdateId + 1) && (u >= lastUpdateId + 1)) {
+                    break;
+                }
+                this.emit ('err', new ExchangeError (this.id + ': error in update ids in deltas for ' + symbol));
+                this.websocketClose (contextId);
+                return;
+            }
+            // process orderbook
+            for (let i = index; i < deltas.length; i++) {
+                const delta = deltas[i];
+                this.mergeOrderBookDelta (response, delta, undefined, 'b', 'a');
+            }
+            data['ob'] = response;
+            data['deltas'] = [];
+            if (typeof config !== 'undefined') {
+                this.emit ('ob', symbol, this._cloneOrderBook (response, config['ob'][symbol]['limit']));
+            } else {
+                this.emit ('ob', symbol, this._cloneOrderBook (response));
+            }
+            this._contextSetSymbolData (contextId, 'ob', symbol, data);
+        }
+    }
+
+    _websocketSubscribe (contextId, event, symbol, nonce, params = {}) {
+        if (event !== 'ob' && event !== 'trade' && event !== 'ohlcv' && event !== 'ticker' && event !== 'partob') {
+            throw new NotSupported ('subscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
+        }
+        if (event === 'ob') {
+            let config = this._contextGet (contextId, 'config');
+            if (typeof config === 'undefined') {
+                config = {};
+            }
+            const newConfig = {
+                'ob': {},
+            };
+            newConfig['ob'][symbol] = {
+                'limit': this.safeInteger (params, 'limit', undefined),
+            };
+            config = this.deepExtend (config, newConfig);
+            this._contextSet (contextId, 'config', config);
+        }
+        const nonceStr = nonce.toString ();
+        this.emit (nonceStr, true);
+    }
+
+    _websocketUnsubscribe (contextId, event, symbol, nonce, params = {}) {
+        if (event !== 'ob' && event !== 'trade' && event !== 'ohlcv' && event !== 'ticker' && event !== 'partob') {
+            throw new NotSupported ('unsubscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
+        }
+        const nonceStr = nonce.toString ();
+        this.emit (nonceStr, true);
+    }
+
+    _websocketOnOpen (contextId, websocketConexConfig) {
+        const url = websocketConexConfig['url'];
+        const parts = url.split ('=');
+        let partsLen = parts.length;
+        if (partsLen > 1) {
+            let streams = parts[1];
+            streams = streams.split ('/');
+            for (let i = 0; i < streams.length; i++) {
+                const stream = streams[i];
+                const pair = stream.split ('@');
+                partsLen = pair.length;
+                if (partsLen >= 2) {
+                    // let symbol = this.findSymbol (pair[0].toUpperCase ());
+                    let event = pair[1].toLowerCase ();
+                    if (event === 'depth') {
+                        event = 'ob';
+                    } else if (event.indexOf ('depth') >= 0) {
+                        event = 'partob';
+                    } else if (event === 'trade') {
+                        event = 'trade';
+                    } else if (event === 'aggtrade') {
+                        event = 'aggtrade';
+                    } else if (event.indexOf ('ohlcv') >= 0) {
+                        event = 'kline';
+                    } else if (event.indexOf ('24hrTicker') >= 0) {
+                        event = 'ticker';
+                        // this._contextSetSubscribed (contextId, event, symbol, true);
+                        // this._contextSetSubscribing (contextId, event, symbol, false);
+                    }
+                }
+            }
+        }
+    }
+
+    _websocketGenerateUrlStream (events, options, params = {}) {
+        const streamList = [];
+        for (let i = 0; i < events.length; i++) {
+            const element = events[i];
+            const parameters = this.extend ({
+                'event': element['event'],
+                'symbol': this._websocketMarketId (element['symbol']),
+                'interval': this.safeString (params, 'timeframe', '1m'),
+                'obdepth': this.safeString (params, 'obdepth', '20'),
+                'obinterval': this.safeString (params, 'obinterval', '1000ms'),
+            }, params);
+            const streamGenerator = this.wsconf['events'][element['event']]['conx-param']['stream'];
+            streamList.push (this.implodeParams (streamGenerator, parameters));
+        }
+        const stream = streamList.join ('/');
+        // console.log(options['url'] + stream)
+        return options['url'] + stream;
+    }
+
+    _websocketMarketId (symbol) {
+        return this.marketId (symbol).toLowerCase ();
+    }
+
+    _getCurrentWebsocketOrderbook (contextId, symbol, limit) {
+        const data = this._contextGetSymbolData (contextId, 'ob', symbol);
+        if (('ob' in data) && (typeof data['ob'] !== 'undefined')) {
+            return this._cloneOrderBook (data['ob'], limit);
+        }
+        return undefined;
     }
 };

@@ -14,11 +14,12 @@ module.exports = class deribit extends Exchange {
             'id': 'deribit',
             'name': 'Deribit',
             'countries': [ 'NL' ], // Netherlands
-            'version': 'v1',
+            'version': 'v2',
             'userAgent': undefined,
             'rateLimit': 2000,
             'has': {
                 'CORS': true,
+                'fetchOHLCV': true,
                 'editOrder': true,
                 'fetchOrder': true,
                 'fetchOrders': false,
@@ -26,6 +27,23 @@ module.exports = class deribit extends Exchange {
                 'fetchClosedOrders': true,
                 'fetchMyTrades': true,
                 'fetchTickers': false,
+            },
+            'timeframes': {
+                '1m': '1m',
+                '3m': '3m',
+                '5m': '5m',
+                '15m': '15m',
+                '30m': '30m',
+                '1h': '1h',
+                '2h': '2h',
+                '4h': '4h',
+                '6h': '6h',
+                '8h': '8h',
+                '12h': '12h',
+                '1d': '1d',
+                '3d': '3d',
+                '1w': '1w',
+                '1M': '1M',
             },
             'urls': {
                 'test': 'https://test.deribit.com',
@@ -52,6 +70,7 @@ module.exports = class deribit extends Exchange {
                         'getsummary',
                         'stats',
                         'getannouncments',
+                        'get_tradingview_chart_data'
                     ],
                 },
                 'private': {
@@ -76,13 +95,15 @@ module.exports = class deribit extends Exchange {
             'wsconf': {
                 'conx-tpls': {
                     'default': {
-                        'type': 'ws-s',
-                        'baseurl': 'wss://www.deribit.com/ws/api/v1',
+                        'type': 'ws',
+                        'testurl': 'wss://testapp.deribit.com/ws/api/v2',
+                        'baseurl': 'wss://www.deribit.com/ws/api/v2/',
                     },
                 },
                 'methodmap': {
-                    'fetchOrderBook': 'fetchOrderBook',
-                    '_websocketHandleObRestSnapshot': '_websocketHandleObRestSnapshot',
+                    '_websocketTimeoutSendPing': '_websocketTimeoutSendPing',
+                    '_websocketTimeoutRemoveNonce': '_websocketTimeoutRemoveNonce',
+                    '_websocketTimeoutPong': '_websocketTimeoutPong',
                 },
                 'events': {
                     'ob': {
@@ -90,24 +111,6 @@ module.exports = class deribit extends Exchange {
                         'conx-param': {
                             'url': '{baseurl}',
                             'id': '{id}',
-                            'stream': '{symbol}@depth@{obinterval}',
-                            'stream2': '{symbol}@depth{obdepth}@{obinterval}',
-                        },
-                    },
-                    'partob': {
-                        'conx-tpl': 'default',
-                        'conx-param': {
-                            'url': '{baseurl}',
-                            'id': '{id}',
-                            'stream': '{symbol}@depth{obdepth}@{obinterval}',
-                        },
-                    },
-                    'aggtrade': {
-                        'conx-tpl': 'default',
-                        'conx-param': {
-                            'url': '{baseurl}',
-                            'id': '{id}',
-                            'stream': '{symbol}@aggTrade',
                         },
                     },
                     'trade': {
@@ -115,23 +118,6 @@ module.exports = class deribit extends Exchange {
                         'conx-param': {
                             'url': '{baseurl}',
                             'id': '{id}',
-                            'stream': '{symbol}@trade',
-                        },
-                    },
-                    'ohlcv': {
-                        'conx-tpl': 'default',
-                        'conx-param': {
-                            'url': '{baseurl}',
-                            'id': '{id}',
-                            'stream': '{symbol}@kline_{interval}',
-                        },
-                    },
-                    'ticker': {
-                        'conx-tpl': 'default',
-                        'conx-param': {
-                            'url': '{baseurl}',
-                            'id': '{id}',
-                            'stream': '{symbol}@ticker',
                         },
                     },
                 },
@@ -298,6 +284,37 @@ module.exports = class deribit extends Exchange {
         account['total'] = this.safeFloat (balance, 'equity');
         result[code] = account;
         return this.parseBalance (result);
+    }
+
+    async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
+        const duration = this.parseTimeframe(timeframe) / 60;
+        const request = {
+            'instrument_name': market['id'],
+            'resolution': duration,
+            'start_timestamp': Date.now() - duration * 60 * 1000,     // true == include yet-incomplete current bins
+            'end_timestamp': Date.now(),     // true == include yet-incomplete current bins
+        };
+        if (limit !== undefined) {
+            request['start_timestamp'] -= (duration * (limit - 2) * 60 * 1000); // default 100, max 500
+        }
+        if (since !== undefined) {
+            request['start_timestamp'] = since; // starting date filter for results
+        }
+        const response = await this.public_get_get_tradingview_chart_data(this.extend(request, params));
+        const result = [];
+        response.result.ticks.forEach((tick, index)=>{
+            let candle = [];
+            candle.push(tick);
+            candle.push(response.result.open[index]);
+            candle.push(response.result.high[index]);
+            candle.push(response.result.low[index]);
+            candle.push(response.result.close[index]);
+            candle.push(response.result.volume[index]);
+            result.push(candle);
+        });
+        return result;
     }
 
     async fetchDepositAddress (code, params = {}) {
@@ -767,265 +784,275 @@ module.exports = class deribit extends Exchange {
         }
     }
 
-    websocketOnMessage (contextId, data) {
-        const msg = JSON.parse (data);
-        const stream = this.safeString (msg, 'stream');
-        const resData = this.safeValue (msg, 'data', {});
-        const parts = stream.split ('@');
-        const partsLen = parts.length;
-        if (partsLen >= 2) {
-            const msgType = parts[1];
-            if (msgType === 'depth') {
-                this._websocketHandleOb (contextId, resData);
-            } else if (msgType.indexOf ('depth') >= 0) {
-                const symbol = this.findSymbol (parts[0]);
-                this._websocketHandlePartialOb (contextId, symbol, resData);
-            } else if (msgType === 'trade') {
-                this._websocketHandleTrade (contextId, resData);
-            } else if (msgType === 'aggTrade') {
-                this._websocketHandleTrade (contextId, resData);
-            } else if (msgType.indexOf ('kline') >= 0) {
-                this._websocketHandleKline (contextId, resData);
-            } else if (msgType === 'ticker') {
-                this._websocketHandleTicker (contextId, resData);
-            }
+    _websocketOnOpen(contextId, websocketOptions) { // eslint-disable-line no-unused-vars
+        this._websocketRestartPingTimer(contextId);
+        const dbids = {};
+        this._contextSet(contextId, 'dbids', dbids);
+        // send auth
+        // let nonce = this.nonce ();
+        // let signature = this.hmac (this.encode ('GET/realtime' + nonce.toString ()), this.encode (this.secret));
+        // let payload = {
+        //     'op': 'authKeyExpires',
+        //     'args': [this.apiKey, nonce, signature]
+        //  };
+        // this.asyncSendJson (payload);
+    }
+
+    _websocketOnMessage(contextId, data) {
+        this._websocketRestartPingTimer(contextId);
+        const msg = JSON.parse(data);
+        if(msg.result){
+            this._websocketHandleSubscription(contextId, msg);
+        }
+        else if(msg.params && msg.params.channel.indexOf("book") > -1){
+            this._websocketHandleOb(contextId, msg);
+        }
+        else if(msg.error){
+            this._websocketHandleError(contextId, msg.error);
         }
     }
 
-    _websocketHandleOb (contextId, data) {
-        const symbol = this.findSymbol (this.safeString (data, 's'));
-        // if asyncContext has no previous orderbook you have to cache all deltas
-        // and fetch orderbook from rest api
-        let symbolData = this._contextGetSymbolData (contextId, 'ob', symbol);
-        if (!('ob' in symbolData)) {
-            if (!('deltas' in symbolData)) {
-                symbolData['deltas'] = [];
-            }
-            const deltas = symbolData['deltas'];
-            const partsLen = deltas.length;
-            if (partsLen > 50) {
-                if (!('failCount' in symbolData)) {
-                    symbolData['failCount'] = 0;
-                }
-                symbolData['failCount'] = symbolData['failCount'] + 1;
-                if (symbolData['failCount'] > 5) {
-                    this.emit ('err', new ExchangeError (this.id + ': max deltas failCount reached for symbol ' + symbol));
-                    this.websocketClose (contextId);
-                } else {
-                    // Launch again
-                    symbolData = this.omit (symbolData, 'ob');
-                    symbolData = this.omit (symbolData, 'deltas');
-                }
-                this._contextSetSymbolData (contextId, 'ob', symbol, symbolData);
-            } else {
-                symbolData['deltas'].push (data);
-                if (!('snaplaunched' in symbolData)) {
-                    symbolData['snaplaunched'] = true;
-                    this._executeAndCallback (contextId, this._websocketMethodMap ('fetchOrderBook'), [symbol], this._websocketMethodMap ('_websocketHandleObRestSnapshot'), {
-                        'symbol': symbol,
-                        'contextId': contextId,
-                    });
-                }
-                this._contextSetSymbolData (contextId, 'ob', symbol, symbolData);
-            }
+    _websocketOnPong(contextId, sequence) {
+        console.log('PONG ' + sequence);
+        const sequenceStr = '_' + sequence.toString();
+        const pongTimers = this._contextGet(contextId, 'pongtimers');
+        if (sequenceStr in pongTimers) {
+            const timer = pongTimers[sequenceStr];
+            this._cancelTimeout(timer);
+            this.omit(pongTimers, sequenceStr);
+            this._contextSet(contextId, 'pongtimers', pongTimers);
+        }
+        this._websocketRestartPingTimer(contextId);
+    }
+
+    _websocketTimeoutSendPing(contextId) {
+        let lastSeq = this._contextGet(contextId, 'pingseq');
+        if (typeof lastSeq === 'undefined') {
+            lastSeq = 1;
         } else {
-            const config = this._contextGet (contextId, 'config');
-            symbolData['ob'] = this.mergeOrderBookDelta (symbolData['ob'], data, data['E'], 'b', 'a');
-            if (typeof config !== 'undefined') {
-                this.emit ('ob', symbol, this._cloneOrderBook (symbolData['ob'], config['ob'][symbol]['limit']));
-            } else {
-                this.emit ('ob', symbol, this._cloneOrderBook (symbolData['ob']));
-            }
-            this._contextSetSymbolData (contextId, 'ob', symbol, symbolData);
+            lastSeq = this.sum(lastSeq, 1);
         }
+        const sequenceStr = '_' + lastSeq.toString();
+        console.log('PING ' + lastSeq);
+        this._contextSet(contextId, 'pingseq', lastSeq);
+        this.websocketSendPing(lastSeq);
+        let pongTimers = this._contextGet(contextId, 'pongtimers');
+        if (typeof pongTimers === 'undefined') {
+            pongTimers = [];
+        }
+        const newPongTimer = this._setTimeout(contextId, 5000, this._websocketMethodMap('_websocketTimeoutPong'), [contextId, lastSeq]);
+        pongTimers[sequenceStr] = newPongTimer;
+        this._contextSet(contextId, 'pongtimers', pongTimers);
     }
 
-    _websocketHandlePartialOb (contextId, symbol, data) {
-        const orderbook = this.parseOrderBook (data);
-        orderbook['nonce'] = this.safeInteger (data, 'lastUpdateId');
-        this.emit ('partob', symbol, orderbook);
+    _websocketTimeoutPong(contextId, sequence) {
+        this.emit('err', new ExchangeError(this.id + ' no pong received for ' + sequence), contextId);
     }
 
-    _websocketHandleTrade (contextId, data) {
-        const symbol = this.findSymbol (this.safeString (data, 's'));
-        const market = this.market (symbol);
-        const trade = this.parseTrade (data, market);
-        this.emit ('trade', symbol, trade);
+    _websocketHandleError(contextId, msg) {
+        const status = this.safeInteger(msg, 'code');
+        const error = this.safeString(msg, 'message');
+        this.emit('err', new ExchangeError(this.id + ' status ' + status + ':' + error), contextId);
     }
 
-    _websocketHandleKline (contextId, data) {
-        const symbol = this.findSymbol (this.safeString (data, 's'));
-        const market = this.market (symbol);
-        const kline = this.parseOHLCV ([
-            this.safeFloat (data['k'], 't'),
-            this.safeFloat (data['k'], 'o'),
-            this.safeFloat (data['k'], 'c'),
-            this.safeFloat (data['k'], 'h'),
-            this.safeFloat (data['k'], 'l'),
-            this.safeFloat (data['k'], 'v'),
-        ], market, this.safeFloat (data, 'i'));
-        this.emit ('ohlcv', symbol, kline);
+    _websocketRestartPingTimer(contextId) {
+        // reset ping timer
+        let lastTimer = this._contextGet(contextId, 'timer');
+        if (typeof lastTimer !== 'undefined') {
+            this._cancelTimeout(lastTimer);
+        }
+        lastTimer = this._setTimeout(contextId, 6000, this._websocketMethodMap('_websocketTimeoutSendPing'), [contextId]);
+        this._contextSet(contextId, 'timer', lastTimer);
     }
 
-    _websocketHandleTicker (contextId, data) {
-        const symbol = this.findSymbol (this.safeString (data, 's'));
-        const market = this.market (symbol);
-        const ticker = this.parseTicker ({
-            'symbol': this.safeString (data, 's'),
-            'priceChange': this.safeString (data, 'p'),
-            'priceChangePercent': this.safeString (data, 'P'),
-            'weightedAvgPrice': this.safeString (data, 'v'),
-            'prevClosePrice': this.safeString (data, 'x'),
-            'lastPrice': this.safeString (data, 'c'),
-            'lastQty': this.safeString (data, 'Q'),
-            'bidPrice': this.safeString (data, 'b'),
-            'askPrice': this.safeString (data, 'a'),
-            'openPrice': this.safeString (data, 'o'),
-            'highPrice': this.safeString (data, 'h'),
-            'lowPrice': this.safeString (data, 'l'),
-            'volume': this.safeString (data, 'v'),
-            'quoteVolume': this.safeString (data, 'q'),
-            'openTime': this.safeString (data, 'O'),
-            'closeTime': this.safeString (data, 'C'),
-            'firstId': this.safeString (data, 'F'),   // First tradeId
-            'lastId': this.safeString (data, 'L'),    // Last tradeId
-            'count': this.safeString (data, 'n'),         // Trade count
-        }, market);
-        ticker['info'] = data;
-        this.emit ('ticker', symbol, ticker);
+    _websocketOnClose(contextId) {
+        let lastTimer = this._contextGet(contextId, 'timer');
+        if (typeof lastTimer !== 'undefined') {
+            this._cancelTimeout(lastTimer);
+        }
+        lastTimer = undefined;
+        this._contextSet(contextId, 'timer', lastTimer);
     }
 
-    _websocketHandleObRestSnapshot (context, error, response) {
-        const symbol = context['symbol'];
-        const contextId = context['contextId'];
-        const data = this._contextGetSymbolData (contextId, 'ob', symbol);
-        const config = this._contextGet (contextId, 'config');
-        // console.log ('order book snapshot returned for '+ symbol);
-        if (!error) {
-            const lastUpdateId = this.safeInteger (response, 'nonce');
-            const deltas = data['deltas'];
-            let index = 0;
-            for (index = 0; index < deltas.length; index++) {
-                const delta = deltas[index];
-                const U = this.safeInteger (delta, 'U');
-                const u = this.safeInteger (delta, 'u');
-                if (u <= lastUpdateId) {
-                    continue;
+    _websocketHandleSubscription(contextId, msg) {
+        const parts = msg.result[0].split('.');
+        const partsLen = parts.length;
+        let event = undefined;
+        if (parts[0] === 'book') {
+            event = 'ob';
+        } else if (parts[0] === 'trade') {
+            event = 'trade';
+        } else {
+            event = undefined;
+        }
+        if (typeof event !== 'undefined') {
+            const symbol = this.findSymbol(parts[1]);
+            const symbolData = this._contextGetSymbolData(contextId, event, symbol);
+            if ('sub-nonces' in symbolData) {
+                const nonces = symbolData['sub-nonces'];
+                const keys = Object.keys(nonces);
+                for (let i = 0; i < keys.length; i++) {
+                    const nonce = keys[i];
+                    this._cancelTimeout(nonces[nonce]);
+                    this.emit(nonce, 200);
                 }
-                if ((U <= lastUpdateId + 1) && (u >= lastUpdateId + 1)) {
-                    break;
-                }
-                this.emit ('err', new ExchangeError (this.id + ': error in update ids in deltas for ' + symbol));
-                this.websocketClose (contextId);
-                return;
+                symbolData['sub-nonces'] = {};
+                this._contextSetSymbolData(contextId, event, symbol, symbolData);
             }
-            // process orderbook
-            for (let i = index; i < deltas.length; i++) {
-                const delta = deltas[i];
-                this.mergeOrderBookDelta (response, delta, undefined, 'b', 'a');
-            }
-            data['ob'] = response;
-            data['deltas'] = [];
-            if (typeof config !== 'undefined') {
-                this.emit ('ob', symbol, this._cloneOrderBook (response, config['ob'][symbol]['limit']));
+        }
+    }
+
+    _websocketHandleUnsubscription(contextId, msg) {
+        const success = this.safeValue(msg, 'success');
+        const unsubscribe = this.safeString(msg, 'unsubscribe');
+        const parts = unsubscribe.split(':');
+        const partsLen = parts.length;
+        let event = undefined;
+        if (partsLen === 2) {
+            if (parts[0] === 'orderBookL2') {
+                event = 'ob';
+            } else if (parts[0] === 'trade') {
+                event = 'trade';
             } else {
-                this.emit ('ob', symbol, this._cloneOrderBook (response));
+                event = undefined;
             }
-            this._contextSetSymbolData (contextId, 'ob', symbol, data);
-        }
-    }
-
-    _websocketSubscribe (contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade' && event !== 'ohlcv' && event !== 'ticker' && event !== 'partob') {
-            throw new NotSupported ('subscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
-        }
-        if (event === 'ob') {
-            let config = this._contextGet (contextId, 'config');
-            if (typeof config === 'undefined') {
-                config = {};
-            }
-            const newConfig = {
-                'ob': {},
-            };
-            newConfig['ob'][symbol] = {
-                'limit': this.safeInteger (params, 'limit', undefined),
-            };
-            config = this.deepExtend (config, newConfig);
-            this._contextSet (contextId, 'config', config);
-        }
-        const nonceStr = nonce.toString ();
-        this.emit (nonceStr, true);
-    }
-
-    _websocketUnsubscribe (contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade' && event !== 'ohlcv' && event !== 'ticker' && event !== 'partob') {
-            throw new NotSupported ('unsubscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
-        }
-        const nonceStr = nonce.toString ();
-        this.emit (nonceStr, true);
-    }
-
-    _websocketOnOpen (contextId, websocketConexConfig) {
-        const url = websocketConexConfig['url'];
-        const parts = url.split ('=');
-        let partsLen = parts.length;
-        if (partsLen > 1) {
-            let streams = parts[1];
-            streams = streams.split ('/');
-            for (let i = 0; i < streams.length; i++) {
-                const stream = streams[i];
-                const pair = stream.split ('@');
-                partsLen = pair.length;
-                if (partsLen >= 2) {
-                    // let symbol = this.findSymbol (pair[0].toUpperCase ());
-                    let event = pair[1].toLowerCase ();
-                    if (event === 'depth') {
-                        event = 'ob';
-                    } else if (event.indexOf ('depth') >= 0) {
-                        event = 'partob';
-                    } else if (event === 'trade') {
-                        event = 'trade';
-                    } else if (event === 'aggtrade') {
-                        event = 'aggtrade';
-                    } else if (event.indexOf ('ohlcv') >= 0) {
-                        event = 'kline';
-                    } else if (event.indexOf ('24hrTicker') >= 0) {
-                        event = 'ticker';
-                        // this._contextSetSubscribed (contextId, event, symbol, true);
-                        // this._contextSetSubscribing (contextId, event, symbol, false);
+            if (typeof event !== 'undefined') {
+                const symbol = this.findSymbol(parts[1]);
+                if (success && event === 'ob') {
+                    const dbids = this._contextGet(contextId, 'dbids');
+                    if (symbol in dbids) {
+                        this.omit(dbids, symbol);
+                        this._contextSet(contextId, 'dbids', dbids);
                     }
                 }
+                const symbolData = this._contextGetSymbolData(contextId, event, symbol);
+                if ('unsub-nonces' in symbolData) {
+                    const nonces = symbolData['unsub-nonces'];
+                    const keys = Object.keys(nonces);
+                    for (let i = 0; i < keys.length; i++) {
+                        const nonce = keys[i];
+                        this._cancelTimeout(nonces[nonce]);
+                        this.emit(nonce, success);
+                    }
+                    symbolData['unsub-nonces'] = {};
+                    this._contextSetSymbolData(contextId, event, symbol, symbolData);
+                }
             }
         }
     }
 
-    _websocketGenerateUrlStream (events, options, params = {}) {
-        const streamList = [];
-        for (let i = 0; i < events.length; i++) {
-            const element = events[i];
-            const parameters = this.extend ({
-                'event': element['event'],
-                'symbol': this._websocketMarketId (element['symbol']),
-                'interval': this.safeString (params, 'timeframe', '1m'),
-                'obdepth': this.safeString (params, 'obdepth', '20'),
-                'obinterval': this.safeString (params, 'obinterval', '1000ms'),
-            }, params);
-            const streamGenerator = this.wsconf['events'][element['event']]['conx-param']['stream'];
-            streamList.push (this.implodeParams (streamGenerator, parameters));
+    _websocketHandleTrade(contextId, msg) {
+        const data = this.safeValue(msg, 'data');
+        const dataLength = data.length;
+        if (typeof data === 'undefined' || dataLength === 0) {
+            return;
         }
-        const stream = streamList.join ('/');
-        // console.log(options['url'] + stream)
-        return options['url'] + stream;
+        let symbol = this.safeString(data[0], 'symbol');
+        const trades = this.parseTrades(data);
+        symbol = this.findSymbol(symbol);
+        for (let t = 0; t < trades.length; t++) {
+            this.emit('trade', symbol, trades[t]);
+        }
     }
 
-    _websocketMarketId (symbol) {
-        return this.marketId (symbol).toLowerCase ();
+    _websocketHandleOb(contextId, msg) {
+        const data = msg.params.data;
+        let symbol = data.instrument_name;
+        const dbids = this._contextGet(contextId, 'dbids');
+        symbol = this.findSymbol(symbol);
+        const ob = {
+            'bids': data.bids,
+            'asks': data.asks,
+            'timestamp': data.timestamp,
+            'datetime': new Date(),
+            'nonce': data.change_id,
+        };
+        // const symbolData = this._contextGetSymbolData(contextId, 'ob', symbol);
+        // symbolData['ob'] = ob;
+        // dbids[symbol] = obIds;
+        // this.emit('ob', symbol, this._cloneOrderBook(ob, symbolData['limit']));
+        this.emit('ob', symbol, ob);
+        this._contextSet(contextId, 'dbids', dbids);
+        this._contextSetSymbolData(contextId, 'ob', symbol, {ob});
     }
 
-    _getCurrentWebsocketOrderbook (contextId, symbol, limit) {
-        const data = this._contextGetSymbolData (contextId, 'ob', symbol);
+    _websocketSubscribe(contextId, event, symbol, nonce, params = {}) {
+        if (event !== 'ob' && event !== 'trade') {
+            throw new NotSupported('subscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
+        }
+        const symbolData = this._contextGetSymbolData(contextId, event, symbol);
+        if (!('sub-nonces' in symbolData)) {
+            symbolData['sub-nonces'] = {};
+        }
+        const id = this.market_id(symbol).toUpperCase();
+        let payload = undefined;
+        if (event === 'ob') {
+            const limit = this.safeInteger(params, 'limit', undefined);
+            payload = {
+                'method': 'public/subscribe',
+                'params': {
+                    'channels': ['book.' + id + '.none.' + limit + '.100ms']
+                },
+                'jsonrpc': '2.0',
+                'id': 1
+            };
+            symbolData['limit'] = limit;
+        } else if (event === 'trade') {
+            payload = {
+                'op': 'subscribe',
+                'args': ['trade:' + id],
+            };
+        }
+        const nonceStr = nonce.toString();
+        const handle = this._setTimeout(contextId, this.timeout, this._websocketMethodMap('_websocketTimeoutRemoveNonce'), [contextId, nonceStr, event, symbol, 'sub-nonce']);
+        symbolData['sub-nonces'][nonceStr] = handle;
+        this._contextSetSymbolData(contextId, event, symbol, symbolData);
+        this.websocketSendJson(payload);
+    }
+
+    _websocketUnsubscribe(contextId, event, symbol, nonce, params = {}) {
+        if (event !== 'ob' && event !== 'trade') {
+            throw new NotSupported('unsubscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
+        }
+        const symbolData = this._contextGetSymbolData(contextId, event, symbol);
+        if (!('unsub-nonces' in symbolData)) {
+            symbolData['unsub-nonces'] = {};
+        }
+        const id = this.market_id(symbol).toUpperCase();
+        let payload = undefined;
+        if (event === 'ob') {
+            payload = {
+                'op': 'unsubscribe',
+                'args': ['orderBookL2:' + id],
+            };
+        } else if (event === 'trade') {
+            payload = {
+                'op': 'unsubscribe',
+                'args': ['trade:' + id],
+            };
+        }
+        const nonceStr = nonce.toString();
+        const handle = this._setTimeout(contextId, this.timeout, this._websocketMethodMap('_websocketTimeoutRemoveNonce'), [contextId, nonceStr, event, symbol, 'unsub-nonces']);
+        symbolData['unsub-nonces'][nonceStr] = handle;
+        this._contextSetSymbolData(contextId, event, symbol, symbolData);
+        this.websocketSendJson(payload);
+    }
+
+    _websocketTimeoutRemoveNonce(contextId, timerNonce, event, symbol, key) {
+        const symbolData = this._contextGetSymbolData(contextId, event, symbol);
+        if (key in symbolData) {
+            const nonces = symbolData[key];
+            if (timerNonce in nonces) {
+                this.omit(symbolData[key], timerNonce);
+                this._contextSetSymbolData(contextId, event, symbol, symbolData);
+            }
+        }
+    }
+
+    _getCurrentWebsocketOrderbook(contextId, symbol, limit) {
+        const data = this._contextGetSymbolData(contextId, 'ob', symbol);
         if (('ob' in data) && (typeof data['ob'] !== 'undefined')) {
-            return this._cloneOrderBook (data['ob'], limit);
+            return this._cloneOrderBook(data['ob'], limit);
         }
         return undefined;
     }

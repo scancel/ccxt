@@ -881,7 +881,7 @@ module.exports = class bitmex extends Exchange {
             this.safeFloat(ohlcv, 'high'),
             this.safeFloat(ohlcv, 'low'),
             this.safeFloat(ohlcv, 'close'),
-            this.safeFloat(ohlcv, 'volume'),
+            this.safeFloat(ohlcv, 'homeNotional'), //changed from "volume" to 'homeNotional to change the vol from $ to Bitcoin'
         ];
     }
 

@@ -139,6 +139,7 @@ module.exports = class bitmex extends Exchange {
                     'default': {
                         'type': 'ws',
                         'baseurl': 'wss://www.bitmex.com/realtime',
+                        'test': 'wss://testnet.bitmex.com/realtime'
                     },
                 },
                 'methodmap': {
@@ -161,6 +162,13 @@ module.exports = class bitmex extends Exchange {
                             'id': '{id}',
                         },
                     },
+                    'my_orders': {
+                        'conx-tpl': 'default',
+                        'conx-param': {
+                            'url': '{baseurl}',
+                            'id': '{id}',
+                        },
+                    }
                 },
             },
             'exceptions': {
@@ -1291,7 +1299,7 @@ module.exports = class bitmex extends Exchange {
             }
         }
         const url = this.urls['api'] + query;
-        if (this.apiKey && this.secret) {
+        if (this.apiKey && this.secret && api === "private") {
             let auth = method + query;
             let expires = this.safeInteger(this.options, 'api-expires');
             headers = {
@@ -1317,14 +1325,15 @@ module.exports = class bitmex extends Exchange {
         this._websocketRestartPingTimer(contextId);
         const dbids = {};
         this._contextSet(contextId, 'dbids', dbids);
+        
         // send auth
-        // let nonce = this.nonce ();
-        // let signature = this.hmac (this.encode ('GET/realtime' + nonce.toString ()), this.encode (this.secret));
-        // let payload = {
-        //     'op': 'authKeyExpires',
-        //     'args': [this.apiKey, nonce, signature]
-        //  };
-        // this.asyncSendJson (payload);
+        let nonce = this.nonce ();
+        let signature = this.hmac (this.encode ('GET/realtime' + nonce.toString ()), this.encode (this.secret));
+        let payload = {
+            'op': 'authKeyExpires',
+            'args': [this.apiKey, nonce, signature]
+         };
+        this.websocketSend (JSON.stringify(payload), contextId);
     }
 
     _websocketOnMessage(contextId, data) {
@@ -1341,10 +1350,19 @@ module.exports = class bitmex extends Exchange {
         } else if (typeof table !== 'undefined') {
             if (table === 'orderBookL2') {
                 this._websocketHandleOb(contextId, msg);
-            } else if (table === 'trade') {
+            }
+            else if (table === 'trade') {
                 this._websocketHandleTrade(contextId, msg);
             }
-        } else if (typeof status !== 'undefined') {
+            else if (table === 'order') {
+                this._websocketHandleMyOrders(contextId, msg);
+            }
+        }
+        else if (data.indexOf("Welcome to the BitMEX") > -1){
+            //do nothing
+            console.log("Bitmex WS Connected");
+        }
+        else if (typeof status !== 'undefined') {
             this._websocketHandleError(contextId, msg);
         }
     }
@@ -1422,6 +1440,8 @@ module.exports = class bitmex extends Exchange {
                 event = 'ob';
             } else if (parts[0] === 'trade') {
                 event = 'trade';
+            } else if (parts[0] === 'order') {
+                event = 'my_orders';
             } else {
                 event = undefined;
             }
@@ -1454,6 +1474,8 @@ module.exports = class bitmex extends Exchange {
                 event = 'ob';
             } else if (parts[0] === 'trade') {
                 event = 'trade';
+            } else if (parts[0] === 'order') {
+                event = 'my_orders';
             } else {
                 event = undefined;
             }
@@ -1480,6 +1502,18 @@ module.exports = class bitmex extends Exchange {
                 }
             }
         }
+    }
+
+    _websocketHandleMyOrders(contextId, msg) {
+        const data = this.safeValue(msg, 'data').filter(item => !item.workingIndicator);
+        const dataLength = data.length;
+        if (typeof data === 'undefined' || dataLength === 0) {
+            return;
+        }
+        let symbol = this.safeString(data[0], 'symbol');
+        symbol = this.findSymbol(symbol);
+        const orders = data.map(item => this.parseOrder(item));
+        this.emit('my_orders', symbol, orders);
     }
 
     _websocketHandleTrade(contextId, msg) {
@@ -1579,7 +1613,7 @@ module.exports = class bitmex extends Exchange {
     }
 
     _websocketSubscribe(contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade') {
+        if (event !== 'ob' && event !== 'trade' && event !== "my_orders") {
             throw new NotSupported('subscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
         }
         const symbolData = this._contextGetSymbolData(contextId, event, symbol);
@@ -1594,10 +1628,17 @@ module.exports = class bitmex extends Exchange {
                 'args': ['orderBookL2:' + id],
             };
             symbolData['limit'] = this.safeInteger(params, 'limit', undefined);
-        } else if (event === 'trade') {
+        } 
+        else if (event === 'trade') {
             payload = {
                 'op': 'subscribe',
                 'args': ['trade:' + id],
+            };
+        }
+        else if (event === 'my_orders') {
+            payload = {
+                'op': 'subscribe',
+                'args': ['order:' + id],
             };
         }
         const nonceStr = nonce.toString();
@@ -1608,7 +1649,7 @@ module.exports = class bitmex extends Exchange {
     }
 
     _websocketUnsubscribe(contextId, event, symbol, nonce, params = {}) {
-        if (event !== 'ob' && event !== 'trade') {
+        if (event !== 'ob' && event !== 'trade' && event !== 'my_orders') {
             throw new NotSupported('unsubscribe ' + event + '(' + symbol + ') not supported for exchange ' + this.id);
         }
         const symbolData = this._contextGetSymbolData(contextId, event, symbol);
@@ -1626,6 +1667,11 @@ module.exports = class bitmex extends Exchange {
             payload = {
                 'op': 'unsubscribe',
                 'args': ['trade:' + id],
+            };
+        } else if (event === 'my_orders') {
+            payload = {
+                'op': 'unsubscribe',
+                'args': ['order:' + id],
             };
         }
         const nonceStr = nonce.toString();

@@ -3001,21 +3001,25 @@ module.exports = class okex extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response, requestHeaders, requestBody) {
         const feedback = this.id + ' ' + body;
+        const res = JSON.parse(body);
         if (code === 503) {
             throw new ExchangeError (feedback);
         }
-        if (!response) {
+        if (!response || (code === 200 && res.result)) {
             return; // fallback to default error handler
         }
-        const message = this.safeString (response, 'message');
-        const errorCode = this.safeString2 (response, 'code', 'error_code');
-        if (message !== undefined) {
-            this.throwExactlyMatchedException (this.exceptions['exact'], message, feedback);
-            this.throwBroadlyMatchedException (this.exceptions['broad'], message, feedback);
-        }
-        this.throwExactlyMatchedException (this.exceptions['exact'], errorCode, feedback);
-        if (message !== undefined) {
-            throw new ExchangeError (feedback); // unknown message
+        else{
+
+            const message = this.safeString (response, 'message');
+            const errorCode = this.safeString2 (response, 'code', 'error_code');
+            if (message !== undefined) {
+                this.throwExactlyMatchedException (this.exceptions['exact'], message, feedback);
+                this.throwBroadlyMatchedException (this.exceptions['broad'], message, feedback);
+            }
+            this.throwExactlyMatchedException (this.exceptions['exact'], errorCode, feedback);
+            if (message !== undefined) {
+                throw new ExchangeError (feedback); // unknown message
+            }
         }
     }
 };
